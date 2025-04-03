@@ -7,7 +7,7 @@ import tensorflow_datasets as tfds
 import tensorflow_hub as hub
 
 
-class ExampleDataset(tfds.core.GeneratorBasedBuilder):
+class SsLifteV1(tfds.core.GeneratorBasedBuilder):
     """DatasetBuilder for example dataset."""
 
     VERSION = tfds.core.Version('1.0.0')
@@ -26,29 +26,60 @@ class ExampleDataset(tfds.core.GeneratorBasedBuilder):
                 'steps': tfds.features.Dataset({
                     'observation': tfds.features.FeaturesDict({
                         'image': tfds.features.Image(
-                            shape=(64, 64, 3),
+                            shape=(224, 224, 3),
                             dtype=np.uint8,
                             encoding_format='png',
-                            doc='Main camera RGB observation.',
+                            doc='Front view RGB camera observation.',
                         ),
-                        'wrist_image': tfds.features.Image(
-                            shape=(64, 64, 3),
+                        'left_image': tfds.features.Image(
+                            shape=(224, 224, 3),
                             dtype=np.uint8,
                             encoding_format='png',
-                            doc='Wrist camera RGB observation.',
+                            doc='Left view RGB camera observation.',
                         ),
-                        'state': tfds.features.Tensor(
-                            shape=(10,),
+                        'right_image': tfds.features.Image(
+                            shape=(224, 224, 3),
+                            dtype=np.uint8,
+                            encoding_format='png',
+                            doc='Right view RGB camera observation.',
+                        ),
+                        'top_image': tfds.features.Image(
+                            shape=(224, 224, 3),
+                            dtype=np.uint8,
+                            encoding_format='png',
+                            doc='Top view RGB camera observation.',
+                        ),
+                        'eef_pos': tfds.features.Tensor(
+                            shape=(3,),
                             dtype=np.float32,
-                            doc='Robot state, consists of [7x robot joint angles, '
-                                '2x gripper position, 1x door opening angle].',
-                        )
+                            doc='End-effector position in 3D space (x, y, z).',
+                        ),
+                        'eef_quat': tfds.features.Tensor(
+                            shape=(4,),
+                            dtype=np.float32,
+                            doc='End-effector orientation as quaternion (w, x, y, z).',
+                        ),
+                        'gripper_pos': tfds.features.Tensor(
+                            shape=(2,),
+                            dtype=np.float32,
+                            doc='Gripper finger positions (2 values representing gripper state).',
+                        ),
+                        'joint_pos': tfds.features.Tensor(
+                            shape=(7,),
+                            dtype=np.float32,
+                            doc='Robot joint positions for the 7-DOF Franka arm.',
+                        ),
+                        'blocks_poses': tfds.features.Tensor(
+                            shape=(14,),
+                            dtype=np.float32,
+                            doc='Poses of blocks in the environment (position and orientation).',
+                        ),
                     }),
                     'action': tfds.features.Tensor(
-                        shape=(10,),
+                        shape=(7,),
                         dtype=np.float32,
-                        doc='Robot action, consists of [7x joint velocities, '
-                            '2x gripper velocities, 1x terminate episode].',
+                        doc='Robot action, consists of [6x end-effector velocity/pose delta, '
+                            '1x gripper open/close command].',
                     ),
                     'discount': tfds.features.Scalar(
                         dtype=np.float32,
@@ -71,7 +102,7 @@ class ExampleDataset(tfds.core.GeneratorBasedBuilder):
                         doc='True on last step of the episode if it is a terminal step, True for demos.'
                     ),
                     'language_instruction': tfds.features.Text(
-                        doc='Language Instruction.'
+                        doc='Language Instruction describing the task to perform.'
                     ),
                     'language_embedding': tfds.features.Tensor(
                         shape=(512,),
@@ -90,16 +121,15 @@ class ExampleDataset(tfds.core.GeneratorBasedBuilder):
     def _split_generators(self, dl_manager: tfds.download.DownloadManager):
         """Define data splits."""
         return {
-            'train': self._generate_examples(path='data/train/episode_*.npy'),
-            'val': self._generate_examples(path='data/val/episode_*.npy'),
+            'train': self._generate_examples(),  # No path parameter needed as there are no splits
         }
 
-    def _generate_examples(self, path) -> Iterator[Tuple[str, Any]]:
+    def _generate_examples(self) -> Iterator[Tuple[str, Any]]:
         """Generator of examples for each split."""
 
         def _parse_example(episode_path):
-            # load raw data --> this should change for your dataset
-            data = np.load(episode_path, allow_pickle=True)     # this is a list of dicts in our case
+            # load raw data
+            data = np.load(episode_path, allow_pickle=True)  # this is a list of dicts in our case
 
             # assemble episode --> here we're assuming demos so we set reward to 1 at the end
             episode = []
@@ -110,15 +140,21 @@ class ExampleDataset(tfds.core.GeneratorBasedBuilder):
                 episode.append({
                     'observation': {
                         'image': step['image'],
-                        'wrist_image': step['wrist_image'],
-                        'state': step['state'],
+                        'left_image': step['left_image'],
+                        'right_image': step['right_image'],
+                        'top_image': step['top_image'],
+                        'eef_pos': step['eef_pos'].astype(np.float32),
+                        'eef_quat': step['eef_quat'].astype(np.float32),
+                        'gripper_pos': step['gripper_pos'].astype(np.float32),
+                        'joint_pos': step['joint_pos'].astype(np.float32),
+                        'blocks_poses': step['blocks_poses'].astype(np.float32),
                     },
                     'action': step['action'],
-                    'discount': 1.0,
-                    'reward': float(i == (len(data) - 1)),
-                    'is_first': i == 0,
-                    'is_last': i == (len(data) - 1),
-                    'is_terminal': i == (len(data) - 1),
+                    'discount': step.get('discount', 1.0),  # Use provided discount or default to 1.0
+                    'reward': step.get('reward', float(i == (len(data) - 1))),  # Use provided reward or default
+                    'is_first': step.get('is_first', i == 0),  # Use provided flag or default
+                    'is_last': step.get('is_last', i == (len(data) - 1)),
+                    'is_terminal': step.get('is_terminal', i == (len(data) - 1)),
                     'language_instruction': step['language_instruction'],
                     'language_embedding': language_embedding,
                 })
@@ -131,11 +167,17 @@ class ExampleDataset(tfds.core.GeneratorBasedBuilder):
                 }
             }
 
-            # if you want to skip an example for whatever reason, simply return None
             return episode_path, sample
 
-        # create list of all examples
-        episode_paths = glob.glob(path)
+        # Find all episodes in the demonstrations directory
+        # Assuming your demonstrations are saved in a structure like demonstrations/env_name/timestamp/episode_*.npy
+        # Adjust the pattern if your directory structure is different
+        episode_paths = glob.glob('demonstrations/**/**/episode_*.npy', recursive=True)
+        
+        if not episode_paths:
+            raise ValueError("No episode files found. Please check the path to your demonstrations.")
+        
+        print(f"Found {len(episode_paths)} episodes")
 
         # for smallish datasets, use single-thread parsing
         for sample in episode_paths:
@@ -147,4 +189,3 @@ class ExampleDataset(tfds.core.GeneratorBasedBuilder):
         #         beam.Create(episode_paths)
         #         | beam.Map(_parse_example)
         # )
-
